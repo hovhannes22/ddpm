@@ -38,7 +38,6 @@ ddpm/
 │   ├── test/
 │   └── loss/
 ├── input/
-├── input-test/
 ├── utils/
 │   ├── utils.py
 │   └── prepare-dataset.py
