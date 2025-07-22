@@ -150,19 +150,19 @@ class MidBlock(nn.Module):
     def forward(self, x, t_emb):
         # x: (B, in_channels, H, W)
 
-        out = self.resnet1(x, t_emb) # (B, out_channels, H*2, W*2)
+        out = self.resnet1(x, t_emb) # (B, out_channels, H, W)
 
         B, C, H, W = out.shape
-        out = self.norm(out) # (B, out_channels, H*2, W*2)
-        attention_out = out.view(B, C, -1).transpose(-2, -1) # (B, H*2*W*2, out_channels)
-        attention_out, _ = self.self_attention(attention_out, attention_out, attention_out) # (B, H*2*W*2, out_channels)
-        attention_out = attention_out.transpose(-2, -1).view(B, C, H, W) # (B, out_channels, H*2, W*2)
+        out = self.norm(out) # (B, out_channels, H, W)
+        attention_out = out.view(B, C, -1).transpose(-2, -1) # (B, H*W, out_channels)
+        attention_out, _ = self.self_attention(attention_out, attention_out, attention_out) # (B, H*W, out_channels)
+        attention_out = attention_out.transpose(-2, -1).view(B, C, H, W) # (B, out_channels, H, W)
 
-        resnet_input = out + attention_out # (B, out_channels, H*2, W*2)
+        resnet_input = out + attention_out # (B, out_channels, H, W)
 
-        out = self.resnet2(resnet_input, t_emb) # (B, out_channels, H*2, W*2)
+        out = self.resnet2(resnet_input, t_emb) # (B, out_channels, H, W)
 
-        out = out + resnet_input # (B, out_channels, H*2, W*2)
+        out = out + resnet_input # (B, out_channels, H, W)
 
         return out
     
