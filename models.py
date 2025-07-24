@@ -236,6 +236,20 @@ class DiffusionGenerator(nn.Module):
 # --------------------------
 # Diffusion Model
 # --------------------------
+def cosine_beta_schedule(timesteps=1000, s=0.008):
+    # Create a time vector from 0 to T inclusive (T+1 values)
+    t = torch.linspace(0, timesteps, steps=timesteps + 1)
+
+    # Compute ᾱ_t = cos²(((t/T + s)/(1 + s)) * π/2)
+    f_t = torch.cos(((t / timesteps) + s) / (1 + s) * math.pi / 2) ** 2
+    alphas_bar = f_t / f_t[0]
+
+    # Compute β_t = 1 - (ᾱ_t / ᾱ_{t-1}) and clip
+    betas = 1 - (alphas_bar[1:] / alphas_bar[:-1])
+    betas = torch.clip(betas, min=1e-8, max=0.999)
+
+    return betas
+
 class Diffuser(nn.Module):
     def __init__(self, timesteps=1000):
         super().__init__()
@@ -245,6 +259,7 @@ class Diffuser(nn.Module):
         self.diffusion_generator = DiffusionGenerator()
 
         betas = torch.linspace(1e-4, 0.02, timesteps)
+        # betas = cosine_beta_schedule(timesteps=1000)
         alphas = 1 - betas
         alphas_cumprod = torch.cumprod(alphas, dim=0)
 
@@ -332,57 +347,52 @@ class Diffuser(nn.Module):
         if return_trajectory:
             return x_t, trajectory
         return x_t
-
+    
     @torch.no_grad()
-    def generate_dpm_solver(self, num_steps=20, return_trajectory=False, device='cuda'):
+    def generate_dpm_solver(self, num_steps=10, return_trajectory=False, device='cuda'):
         self.eval()
 
         B = 4
         H = config.image_size
         W = H
 
-        # Generate noise
         x_t = torch.randn(B, 1, H, W, device=device)
 
-        # Create timesteps
-        timesteps = torch.linspace(1.0, 1e-3, num_steps, device=device)
+        # Log-SNR schedule
+        log_alpha_bar = torch.log(self.alphas_cumprod.to(device))
+        lambda_schedule = torch.linspace(log_alpha_bar[-1], log_alpha_bar[0], num_steps, device=device)
 
-        # Helper: interpolate alphā(t) from training schedule
-        def get_alpha_bar(t_frac_batch):  # shape (B,)
-            t_idx = t_frac_batch * (self.timesteps - 1)
-            low = t_idx.floor().long().clamp(0, self.timesteps - 2)
-            high = low + 1
-            w = (t_idx - low.float()).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)  # (B,1,1,1)
+        def interpolate(buffer, t):
+            fractional_idx = ((t - log_alpha_bar[0]) / (log_alpha_bar[-1] - log_alpha_bar[0])) * (self.timesteps - 1)
+            lower = fractional_idx.floor().long().clamp(0, self.timesteps - 2)
+            upper = (lower + 1).clamp(max=self.timesteps - 1)
+            weight = (fractional_idx - lower.float()).view(-1, 1, 1, 1)
 
-            alpha_low = self.alphas_cumprod[low].view(-1, 1, 1, 1)
-            alpha_high = self.alphas_cumprod[high].view(-1, 1, 1, 1)
+            buffer_lower = buffer[lower].view(-1, 1, 1, 1)
+            buffer_upper = buffer[upper].view(-1, 1, 1, 1)
+            return (1 - weight) * buffer_lower + weight * buffer_upper
 
-            return (1 - w) * alpha_low + w * alpha_high  # (B,1,1,1)
+        def dxdt(x_t, t):
+            alpha_bar = interpolate(self.alphas_cumprod, t)
+            t_idx = (((t - log_alpha_bar[0]) / (log_alpha_bar[-1] - log_alpha_bar[0])) * (self.timesteps - 1)).long()
+            eps = self.diffusion_generator(x_t, t_idx)
+            return 0.5 * (x_t - eps / alpha_bar.sqrt())
 
-        trajectory = [x_t]
+        trajectory = [x_t] # Pure noise added to the list
+        for i in range(num_steps - 1):
+            lam_t = lambda_schedule[i].expand(B)
+            lam_next = lambda_schedule[i + 1].expand(B)
+            h = (lam_next - lam_t).view(B, 1, 1, 1)
 
-        for i in range(num_steps):
-            t_cur = timesteps[i]
-            t_next = timesteps[i + 1] if i + 1 < num_steps else torch.tensor(0.0, device=device)
+            k1 = dxdt(x_t, lam_t)
+            k2 = dxdt(x_t + 0.5 * h * k1, lam_t + 0.5 * (lam_next - lam_t))
+            k3 = dxdt(x_t + 0.5 * h * k2, lam_t + 0.5 * (lam_next - lam_t))
+            k4 = dxdt(x_t + h * k3, lam_next)
 
-            t_index_cur = (t_cur * (self.timesteps - 1)).long()
-            t_batch = t_index_cur.repeat(B)
+            x_t = x_t + (h / 6) * (k1 + 2 * k2 + 2 * k3 + k4)
 
-            eps1 = self.diffusion_generator(x_t, t_batch)
-
-            alpha_cur = get_alpha_bar(t_cur).to(device)
-            x0_pred = (x_t - (1 - alpha_cur).sqrt() * eps1) / alpha_cur.sqrt()
-
-            if i < num_steps - 1:
-                alpha_next = get_alpha_bar(t_next).to(device)
-                x_t_next = alpha_next.sqrt() * x0_pred + (1 - alpha_next).sqrt() * eps1
-            else:
-                x_t_next = x0_pred
-
-            x_t = x_t_next
-            if return_trajectory:
+            if trajectory is not None:
                 trajectory.append(x_t.clone())
 
         self.train()
-        return x_t, trajectory
-    
+        return (x_t, trajectory) if return_trajectory else x_t

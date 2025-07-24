@@ -40,7 +40,7 @@ def save_checkpoint(model, optimizer, epoch, path):
         'epoch': epoch,
     }, path)
 
-def load_checkpoint(model, optimizer, path, device):
+def load_checkpoint(model, optimizer, path, device, training=True):
     folder = Path(path)
     files  = list(folder.glob("*.pth"))
     if not files:
@@ -50,7 +50,8 @@ def load_checkpoint(model, optimizer, path, device):
     print(f"Loading checkpoint from {latest}")
     ckpt = torch.load(latest, map_location=device)
     model.load_state_dict(ckpt['model_state'])
-    optimizer.load_state_dict(ckpt['optimizer_state'])
+    if training:
+        optimizer.load_state_dict(ckpt['optimizer_state'])
     start_epoch  = ckpt['epoch']
     print(f"Resuming from epoch {start_epoch}")
     return start_epoch
